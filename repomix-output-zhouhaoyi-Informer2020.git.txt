@@ -1,0 +1,2450 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+The content has been processed where security check has been disabled.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Security check has been disabled - content may contain sensitive information
+- Files are sorted by Git change count (files with more changes are at the bottom)
+
+
+================================================================
+Directory Structure
+================================================================
+data/
+  __init__.py
+  data_loader.py
+exp/
+  exp_basic.py
+  exp_informer.py
+models/
+  attn.py
+  decoder.py
+  embed.py
+  encoder.py
+  model.py
+scripts/
+  ETTh1.sh
+  ETTh2.sh
+  ETTm1.sh
+  WTH.sh
+utils/
+  masking.py
+  metrics.py
+  timefeatures.py
+  tools.py
+Dockerfile
+environment.yml
+LICENSE
+main_informer.py
+Makefile
+README.md
+requirements.txt
+
+================================================================
+Files
+================================================================
+
+================
+File: data/__init__.py
+================
+
+
+================
+File: data/data_loader.py
+================
+import os
+import numpy as np
+import pandas as pd
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+# from sklearn.preprocessing import StandardScaler
+
+from utils.tools import StandardScaler
+from utils.timefeatures import time_features
+
+import warnings
+warnings.filterwarnings('ignore')
+
+class Dataset_ETT_hour(Dataset):
+    def __init__(self, root_path, flag='train', size=None, 
+                 features='S', data_path='ETTh1.csv', 
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='h', cols=None):
+        # size [seq_len, label_len, pred_len]
+        # info
+        if size == None:
+            self.seq_len = 24*4*4
+            self.label_len = 24*4
+            self.pred_len = 24*4
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+        # init
+        assert flag in ['train', 'test', 'val']
+        type_map = {'train':0, 'val':1, 'test':2}
+        self.set_type = type_map[flag]
+        
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.inverse = inverse
+        self.timeenc = timeenc
+        self.freq = freq
+        
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path,
+                                          self.data_path))
+
+        border1s = [0, 12*30*24 - self.seq_len, 12*30*24+4*30*24 - self.seq_len]
+        border2s = [12*30*24, 12*30*24+4*30*24, 12*30*24+8*30*24]
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+        
+        if self.features=='M' or self.features=='MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features=='S':
+            df_data = df_raw[[self.target]]
+
+        if self.scale:
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+            
+        df_stamp = df_raw[['date']][border1:border2]
+        df_stamp['date'] = pd.to_datetime(df_stamp.date)
+        data_stamp = time_features(df_stamp, timeenc=self.timeenc, freq=self.freq)
+
+        self.data_x = data[border1:border2]
+        if self.inverse:
+            self.data_y = df_data.values[border1:border2]
+        else:
+            self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
+    
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len 
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        if self.inverse:
+            seq_y = np.concatenate([self.data_x[r_begin:r_begin+self.label_len], self.data_y[r_begin+self.label_len:r_end]], 0)
+        else:
+            seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+    
+    def __len__(self):
+        return len(self.data_x) - self.seq_len- self.pred_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+class Dataset_ETT_minute(Dataset):
+    def __init__(self, root_path, flag='train', size=None, 
+                 features='S', data_path='ETTm1.csv', 
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='t', cols=None):
+        # size [seq_len, label_len, pred_len]
+        # info
+        if size == None:
+            self.seq_len = 24*4*4
+            self.label_len = 24*4
+            self.pred_len = 24*4
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+        # init
+        assert flag in ['train', 'test', 'val']
+        type_map = {'train':0, 'val':1, 'test':2}
+        self.set_type = type_map[flag]
+        
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.inverse = inverse
+        self.timeenc = timeenc
+        self.freq = freq
+        
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path,
+                                          self.data_path))
+
+        border1s = [0, 12*30*24*4 - self.seq_len, 12*30*24*4+4*30*24*4 - self.seq_len]
+        border2s = [12*30*24*4, 12*30*24*4+4*30*24*4, 12*30*24*4+8*30*24*4]
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+        
+        if self.features=='M' or self.features=='MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features=='S':
+            df_data = df_raw[[self.target]]
+
+        if self.scale:
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+            
+        df_stamp = df_raw[['date']][border1:border2]
+        df_stamp['date'] = pd.to_datetime(df_stamp.date)
+        data_stamp = time_features(df_stamp, timeenc=self.timeenc, freq=self.freq)
+        
+        self.data_x = data[border1:border2]
+        if self.inverse:
+            self.data_y = df_data.values[border1:border2]
+        else:
+            self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
+    
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        if self.inverse:
+            seq_y = np.concatenate([self.data_x[r_begin:r_begin+self.label_len], self.data_y[r_begin+self.label_len:r_end]], 0)
+        else:
+            seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+    
+    def __len__(self):
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+
+class Dataset_Custom(Dataset):
+    def __init__(self, root_path, flag='train', size=None, 
+                 features='S', data_path='ETTh1.csv', 
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='h', cols=None):
+        # size [seq_len, label_len, pred_len]
+        # info
+        if size == None:
+            self.seq_len = 24*4*4
+            self.label_len = 24*4
+            self.pred_len = 24*4
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+        # init
+        assert flag in ['train', 'test', 'val']
+        type_map = {'train':0, 'val':1, 'test':2}
+        self.set_type = type_map[flag]
+        
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.inverse = inverse
+        self.timeenc = timeenc
+        self.freq = freq
+        self.cols=cols
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path,
+                                          self.data_path))
+        '''
+        df_raw.columns: ['date', ...(other features), target feature]
+        '''
+        # cols = list(df_raw.columns); 
+        if self.cols:
+            cols=self.cols.copy()
+            cols.remove(self.target)
+        else:
+            cols = list(df_raw.columns); cols.remove(self.target); cols.remove('date')
+        df_raw = df_raw[['date']+cols+[self.target]]
+
+        num_train = int(len(df_raw)*0.7)
+        num_test = int(len(df_raw)*0.2)
+        num_vali = len(df_raw) - num_train - num_test
+        border1s = [0, num_train-self.seq_len, len(df_raw)-num_test-self.seq_len]
+        border2s = [num_train, num_train+num_vali, len(df_raw)]
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+        
+        if self.features=='M' or self.features=='MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features=='S':
+            df_data = df_raw[[self.target]]
+
+        if self.scale:
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+            
+        df_stamp = df_raw[['date']][border1:border2]
+        df_stamp['date'] = pd.to_datetime(df_stamp.date)
+        data_stamp = time_features(df_stamp, timeenc=self.timeenc, freq=self.freq)
+
+        self.data_x = data[border1:border2]
+        if self.inverse:
+            self.data_y = df_data.values[border1:border2]
+        else:
+            self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
+    
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len 
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        if self.inverse:
+            seq_y = np.concatenate([self.data_x[r_begin:r_begin+self.label_len], self.data_y[r_begin+self.label_len:r_end]], 0)
+        else:
+            seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+    
+    def __len__(self):
+        return len(self.data_x) - self.seq_len- self.pred_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+class Dataset_Pred(Dataset):
+    def __init__(self, root_path, flag='pred', size=None, 
+                 features='S', data_path='ETTh1.csv', 
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='15min', cols=None):
+        # size [seq_len, label_len, pred_len]
+        # info
+        if size == None:
+            self.seq_len = 24*4*4
+            self.label_len = 24*4
+            self.pred_len = 24*4
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+        # init
+        assert flag in ['pred']
+        
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.inverse = inverse
+        self.timeenc = timeenc
+        self.freq = freq
+        self.cols=cols
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path,
+                                          self.data_path))
+        '''
+        df_raw.columns: ['date', ...(other features), target feature]
+        '''
+        if self.cols:
+            cols=self.cols.copy()
+            cols.remove(self.target)
+        else:
+            cols = list(df_raw.columns); cols.remove(self.target); cols.remove('date')
+        df_raw = df_raw[['date']+cols+[self.target]]
+        
+        border1 = len(df_raw)-self.seq_len
+        border2 = len(df_raw)
+        
+        if self.features=='M' or self.features=='MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features=='S':
+            df_data = df_raw[[self.target]]
+
+        if self.scale:
+            self.scaler.fit(df_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+            
+        tmp_stamp = df_raw[['date']][border1:border2]
+        tmp_stamp['date'] = pd.to_datetime(tmp_stamp.date)
+        pred_dates = pd.date_range(tmp_stamp.date.values[-1], periods=self.pred_len+1, freq=self.freq)
+        
+        df_stamp = pd.DataFrame(columns = ['date'])
+        df_stamp.date = list(tmp_stamp.date.values) + list(pred_dates[1:])
+        data_stamp = time_features(df_stamp, timeenc=self.timeenc, freq=self.freq[-1:])
+
+        self.data_x = data[border1:border2]
+        if self.inverse:
+            self.data_y = df_data.values[border1:border2]
+        else:
+            self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
+    
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        if self.inverse:
+            seq_y = self.data_x[r_begin:r_begin+self.label_len]
+        else:
+            seq_y = self.data_y[r_begin:r_begin+self.label_len]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+    
+    def __len__(self):
+        return len(self.data_x) - self.seq_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+================
+File: exp/exp_basic.py
+================
+import os
+import torch
+import numpy as np
+
+class Exp_Basic(object):
+    def __init__(self, args):
+        self.args = args
+        self.device = self._acquire_device()
+        self.model = self._build_model().to(self.device)
+
+    def _build_model(self):
+        raise NotImplementedError
+        return None
+    
+    def _acquire_device(self):
+        if self.args.use_gpu:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.args.gpu) if not self.args.use_multi_gpu else self.args.devices
+            device = torch.device('cuda:{}'.format(self.args.gpu))
+            print('Use GPU: cuda:{}'.format(self.args.gpu))
+        else:
+            device = torch.device('cpu')
+            print('Use CPU')
+        return device
+
+    def _get_data(self):
+        pass
+
+    def vali(self):
+        pass
+
+    def train(self):
+        pass
+
+    def test(self):
+        pass
+
+================
+File: exp/exp_informer.py
+================
+from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred
+from exp.exp_basic import Exp_Basic
+from models.model import Informer, InformerStack
+
+from utils.tools import EarlyStopping, adjust_learning_rate
+from utils.metrics import metric
+
+import numpy as np
+
+import torch
+import torch.nn as nn
+from torch import optim
+from torch.utils.data import DataLoader
+
+import os
+import time
+
+import warnings
+warnings.filterwarnings('ignore')
+
+class Exp_Informer(Exp_Basic):
+    def __init__(self, args):
+        super(Exp_Informer, self).__init__(args)
+    
+    def _build_model(self):
+        model_dict = {
+            'informer':Informer,
+            'informerstack':InformerStack,
+        }
+        if self.args.model=='informer' or self.args.model=='informerstack':
+            e_layers = self.args.e_layers if self.args.model=='informer' else self.args.s_layers
+            model = model_dict[self.args.model](
+                self.args.enc_in,
+                self.args.dec_in, 
+                self.args.c_out, 
+                self.args.seq_len, 
+                self.args.label_len,
+                self.args.pred_len, 
+                self.args.factor,
+                self.args.d_model, 
+                self.args.n_heads, 
+                e_layers, # self.args.e_layers,
+                self.args.d_layers, 
+                self.args.d_ff,
+                self.args.dropout, 
+                self.args.attn,
+                self.args.embed,
+                self.args.freq,
+                self.args.activation,
+                self.args.output_attention,
+                self.args.distil,
+                self.args.mix,
+                self.device
+            ).float()
+        
+        if self.args.use_multi_gpu and self.args.use_gpu:
+            model = nn.DataParallel(model, device_ids=self.args.device_ids)
+        return model
+
+    def _get_data(self, flag):
+        args = self.args
+
+        data_dict = {
+            'ETTh1':Dataset_ETT_hour,
+            'ETTh2':Dataset_ETT_hour,
+            'ETTm1':Dataset_ETT_minute,
+            'ETTm2':Dataset_ETT_minute,
+            'WTH':Dataset_Custom,
+            'ECL':Dataset_Custom,
+            'Solar':Dataset_Custom,
+            'custom':Dataset_Custom,
+        }
+        Data = data_dict[self.args.data]
+        timeenc = 0 if args.embed!='timeF' else 1
+
+        if flag == 'test':
+            shuffle_flag = False; drop_last = True; batch_size = args.batch_size; freq=args.freq
+        elif flag=='pred':
+            shuffle_flag = False; drop_last = False; batch_size = 1; freq=args.detail_freq
+            Data = Dataset_Pred
+        else:
+            shuffle_flag = True; drop_last = True; batch_size = args.batch_size; freq=args.freq
+        data_set = Data(
+            root_path=args.root_path,
+            data_path=args.data_path,
+            flag=flag,
+            size=[args.seq_len, args.label_len, args.pred_len],
+            features=args.features,
+            target=args.target,
+            inverse=args.inverse,
+            timeenc=timeenc,
+            freq=freq,
+            cols=args.cols
+        )
+        print(flag, len(data_set))
+        data_loader = DataLoader(
+            data_set,
+            batch_size=batch_size,
+            shuffle=shuffle_flag,
+            num_workers=args.num_workers,
+            drop_last=drop_last)
+
+        return data_set, data_loader
+
+    def _select_optimizer(self):
+        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        return model_optim
+    
+    def _select_criterion(self):
+        criterion =  nn.MSELoss()
+        return criterion
+
+    def vali(self, vali_data, vali_loader, criterion):
+        self.model.eval()
+        total_loss = []
+        for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(vali_loader):
+            pred, true = self._process_one_batch(
+                vali_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+            loss = criterion(pred.detach().cpu(), true.detach().cpu())
+            total_loss.append(loss)
+        total_loss = np.average(total_loss)
+        self.model.train()
+        return total_loss
+
+    def train(self, setting):
+        train_data, train_loader = self._get_data(flag = 'train')
+        vali_data, vali_loader = self._get_data(flag = 'val')
+        test_data, test_loader = self._get_data(flag = 'test')
+
+        path = os.path.join(self.args.checkpoints, setting)
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        time_now = time.time()
+        
+        train_steps = len(train_loader)
+        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+        
+        model_optim = self._select_optimizer()
+        criterion =  self._select_criterion()
+
+        if self.args.use_amp:
+            scaler = torch.cuda.amp.GradScaler()
+
+        for epoch in range(self.args.train_epochs):
+            iter_count = 0
+            train_loss = []
+            
+            self.model.train()
+            epoch_time = time.time()
+            for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(train_loader):
+                iter_count += 1
+                
+                model_optim.zero_grad()
+                pred, true = self._process_one_batch(
+                    train_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+                loss = criterion(pred, true)
+                train_loss.append(loss.item())
+                
+                if (i+1) % 100==0:
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    speed = (time.time()-time_now)/iter_count
+                    left_time = speed*((self.args.train_epochs - epoch)*train_steps - i)
+                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    iter_count = 0
+                    time_now = time.time()
+                
+                if self.args.use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.step(model_optim)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    model_optim.step()
+
+            print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
+            train_loss = np.average(train_loss)
+            vali_loss = self.vali(vali_data, vali_loader, criterion)
+            test_loss = self.vali(test_data, test_loader, criterion)
+
+            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
+                epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            early_stopping(vali_loss, self.model, path)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
+
+            adjust_learning_rate(model_optim, epoch+1, self.args)
+            
+        best_model_path = path+'/'+'checkpoint.pth'
+        self.model.load_state_dict(torch.load(best_model_path))
+        
+        return self.model
+
+    def test(self, setting):
+        test_data, test_loader = self._get_data(flag='test')
+        
+        self.model.eval()
+        
+        preds = []
+        trues = []
+        
+        for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(test_loader):
+            pred, true = self._process_one_batch(
+                test_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+            preds.append(pred.detach().cpu().numpy())
+            trues.append(true.detach().cpu().numpy())
+
+        preds = np.array(preds)
+        trues = np.array(trues)
+        print('test shape:', preds.shape, trues.shape)
+        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
+        print('test shape:', preds.shape, trues.shape)
+
+        # result save
+        folder_path = './results/' + setting +'/'
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+        mae, mse, rmse, mape, mspe = metric(preds, trues)
+        print('mse:{}, mae:{}'.format(mse, mae))
+
+        np.save(folder_path+'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path+'pred.npy', preds)
+        np.save(folder_path+'true.npy', trues)
+
+        return
+
+    def predict(self, setting, load=False):
+        pred_data, pred_loader = self._get_data(flag='pred')
+        
+        if load:
+            path = os.path.join(self.args.checkpoints, setting)
+            best_model_path = path+'/'+'checkpoint.pth'
+            self.model.load_state_dict(torch.load(best_model_path))
+
+        self.model.eval()
+        
+        preds = []
+        
+        for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(pred_loader):
+            pred, true = self._process_one_batch(
+                pred_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+            preds.append(pred.detach().cpu().numpy())
+
+        preds = np.array(preds)
+        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+        
+        # result save
+        folder_path = './results/' + setting +'/'
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+        
+        np.save(folder_path+'real_prediction.npy', preds)
+        
+        return
+
+    def _process_one_batch(self, dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
+        batch_x = batch_x.float().to(self.device)
+        batch_y = batch_y.float()
+
+        batch_x_mark = batch_x_mark.float().to(self.device)
+        batch_y_mark = batch_y_mark.float().to(self.device)
+
+        # decoder input
+        if self.args.padding==0:
+            dec_inp = torch.zeros([batch_y.shape[0], self.args.pred_len, batch_y.shape[-1]]).float()
+        elif self.args.padding==1:
+            dec_inp = torch.ones([batch_y.shape[0], self.args.pred_len, batch_y.shape[-1]]).float()
+        dec_inp = torch.cat([batch_y[:,:self.args.label_len,:], dec_inp], dim=1).float().to(self.device)
+        # encoder - decoder
+        if self.args.use_amp:
+            with torch.cuda.amp.autocast():
+                if self.args.output_attention:
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                else:
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        else:
+            if self.args.output_attention:
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+            else:
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        if self.args.inverse:
+            outputs = dataset_object.inverse_transform(outputs)
+        f_dim = -1 if self.args.features=='MS' else 0
+        batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
+
+        return outputs, batch_y
+
+================
+File: models/attn.py
+================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import numpy as np
+
+from math import sqrt
+from utils.masking import TriangularCausalMask, ProbMask
+
+class FullAttention(nn.Module):
+    def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
+        super(FullAttention, self).__init__()
+        self.scale = scale
+        self.mask_flag = mask_flag
+        self.output_attention = output_attention
+        self.dropout = nn.Dropout(attention_dropout)
+        
+    def forward(self, queries, keys, values, attn_mask):
+        B, L, H, E = queries.shape
+        _, S, _, D = values.shape
+        scale = self.scale or 1./sqrt(E)
+
+        scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+        if self.mask_flag:
+            if attn_mask is None:
+                attn_mask = TriangularCausalMask(B, L, device=queries.device)
+
+            scores.masked_fill_(attn_mask.mask, -np.inf)
+
+        A = self.dropout(torch.softmax(scale * scores, dim=-1))
+        V = torch.einsum("bhls,bshd->blhd", A, values)
+        
+        if self.output_attention:
+            return (V.contiguous(), A)
+        else:
+            return (V.contiguous(), None)
+
+class ProbAttention(nn.Module):
+    def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
+        super(ProbAttention, self).__init__()
+        self.factor = factor
+        self.scale = scale
+        self.mask_flag = mask_flag
+        self.output_attention = output_attention
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def _prob_QK(self, Q, K, sample_k, n_top): # n_top: c*ln(L_q)
+        # Q [B, H, L, D]
+        B, H, L_K, E = K.shape
+        _, _, L_Q, _ = Q.shape
+
+        # calculate the sampled Q_K
+        K_expand = K.unsqueeze(-3).expand(B, H, L_Q, L_K, E)
+        index_sample = torch.randint(L_K, (L_Q, sample_k)) # real U = U_part(factor*ln(L_k))*L_q
+        K_sample = K_expand[:, :, torch.arange(L_Q).unsqueeze(1), index_sample, :]
+        Q_K_sample = torch.matmul(Q.unsqueeze(-2), K_sample.transpose(-2, -1)).squeeze(-2)
+
+        # find the Top_k query with sparisty measurement
+        M = Q_K_sample.max(-1)[0] - torch.div(Q_K_sample.sum(-1), L_K)
+        M_top = M.topk(n_top, sorted=False)[1]
+
+        # use the reduced Q to calculate Q_K
+        Q_reduce = Q[torch.arange(B)[:, None, None],
+                     torch.arange(H)[None, :, None],
+                     M_top, :] # factor*ln(L_q)
+        Q_K = torch.matmul(Q_reduce, K.transpose(-2, -1)) # factor*ln(L_q)*L_k
+
+        return Q_K, M_top
+
+    def _get_initial_context(self, V, L_Q):
+        B, H, L_V, D = V.shape
+        if not self.mask_flag:
+            # V_sum = V.sum(dim=-2)
+            V_sum = V.mean(dim=-2)
+            contex = V_sum.unsqueeze(-2).expand(B, H, L_Q, V_sum.shape[-1]).clone()
+        else: # use mask
+            assert(L_Q == L_V) # requires that L_Q == L_V, i.e. for self-attention only
+            contex = V.cumsum(dim=-2)
+        return contex
+
+    def _update_context(self, context_in, V, scores, index, L_Q, attn_mask):
+        B, H, L_V, D = V.shape
+
+        if self.mask_flag:
+            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
+            scores.masked_fill_(attn_mask.mask, -np.inf)
+
+        attn = torch.softmax(scores, dim=-1) # nn.Softmax(dim=-1)(scores)
+
+        context_in[torch.arange(B)[:, None, None],
+                   torch.arange(H)[None, :, None],
+                   index, :] = torch.matmul(attn, V).type_as(context_in)
+        if self.output_attention:
+            attns = (torch.ones([B, H, L_V, L_V])/L_V).type_as(attn).to(attn.device)
+            attns[torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :] = attn
+            return (context_in, attns)
+        else:
+            return (context_in, None)
+
+    def forward(self, queries, keys, values, attn_mask):
+        B, L_Q, H, D = queries.shape
+        _, L_K, _, _ = keys.shape
+
+        queries = queries.transpose(2,1)
+        keys = keys.transpose(2,1)
+        values = values.transpose(2,1)
+
+        U_part = self.factor * np.ceil(np.log(L_K)).astype('int').item() # c*ln(L_k)
+        u = self.factor * np.ceil(np.log(L_Q)).astype('int').item() # c*ln(L_q) 
+
+        U_part = U_part if U_part<L_K else L_K
+        u = u if u<L_Q else L_Q
+        
+        scores_top, index = self._prob_QK(queries, keys, sample_k=U_part, n_top=u) 
+
+        # add scale factor
+        scale = self.scale or 1./sqrt(D)
+        if scale is not None:
+            scores_top = scores_top * scale
+        # get the context
+        context = self._get_initial_context(values, L_Q)
+        # update the context with selected top_k queries
+        context, attn = self._update_context(context, values, scores_top, index, L_Q, attn_mask)
+        
+        return context.transpose(2,1).contiguous(), attn
+
+
+class AttentionLayer(nn.Module):
+    def __init__(self, attention, d_model, n_heads, 
+                 d_keys=None, d_values=None, mix=False):
+        super(AttentionLayer, self).__init__()
+
+        d_keys = d_keys or (d_model//n_heads)
+        d_values = d_values or (d_model//n_heads)
+
+        self.inner_attention = attention
+        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.key_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.value_projection = nn.Linear(d_model, d_values * n_heads)
+        self.out_projection = nn.Linear(d_values * n_heads, d_model)
+        self.n_heads = n_heads
+        self.mix = mix
+
+    def forward(self, queries, keys, values, attn_mask):
+        B, L, _ = queries.shape
+        _, S, _ = keys.shape
+        H = self.n_heads
+
+        queries = self.query_projection(queries).view(B, L, H, -1)
+        keys = self.key_projection(keys).view(B, S, H, -1)
+        values = self.value_projection(values).view(B, S, H, -1)
+
+        out, attn = self.inner_attention(
+            queries,
+            keys,
+            values,
+            attn_mask
+        )
+        if self.mix:
+            out = out.transpose(2,1).contiguous()
+        out = out.view(B, L, -1)
+
+        return self.out_projection(out), attn
+
+================
+File: models/decoder.py
+================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DecoderLayer(nn.Module):
+    def __init__(self, self_attention, cross_attention, d_model, d_ff=None,
+                 dropout=0.1, activation="relu"):
+        super(DecoderLayer, self).__init__()
+        d_ff = d_ff or 4*d_model
+        self.self_attention = self_attention
+        self.cross_attention = cross_attention
+        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = F.relu if activation == "relu" else F.gelu
+
+    def forward(self, x, cross, x_mask=None, cross_mask=None):
+        x = x + self.dropout(self.self_attention(
+            x, x, x,
+            attn_mask=x_mask
+        )[0])
+        x = self.norm1(x)
+
+        x = x + self.dropout(self.cross_attention(
+            x, cross, cross,
+            attn_mask=cross_mask
+        )[0])
+
+        y = x = self.norm2(x)
+        y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
+        y = self.dropout(self.conv2(y).transpose(-1,1))
+
+        return self.norm3(x+y)
+
+class Decoder(nn.Module):
+    def __init__(self, layers, norm_layer=None):
+        super(Decoder, self).__init__()
+        self.layers = nn.ModuleList(layers)
+        self.norm = norm_layer
+
+    def forward(self, x, cross, x_mask=None, cross_mask=None):
+        for layer in self.layers:
+            x = layer(x, cross, x_mask=x_mask, cross_mask=cross_mask)
+
+        if self.norm is not None:
+            x = self.norm(x)
+
+        return x
+
+================
+File: models/embed.py
+================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import math
+
+class PositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).float()
+        pe.require_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(1)]
+
+class TokenEmbedding(nn.Module):
+    def __init__(self, c_in, d_model):
+        super(TokenEmbedding, self).__init__()
+        padding = 1 if torch.__version__>='1.5.0' else 2
+        self.tokenConv = nn.Conv1d(in_channels=c_in, out_channels=d_model, 
+                                    kernel_size=3, padding=padding, padding_mode='circular')
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight,mode='fan_in',nonlinearity='leaky_relu')
+
+    def forward(self, x):
+        x = self.tokenConv(x.permute(0, 2, 1)).transpose(1,2)
+        return x
+
+class FixedEmbedding(nn.Module):
+    def __init__(self, c_in, d_model):
+        super(FixedEmbedding, self).__init__()
+
+        w = torch.zeros(c_in, d_model).float()
+        w.require_grad = False
+
+        position = torch.arange(0, c_in).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()
+
+        w[:, 0::2] = torch.sin(position * div_term)
+        w[:, 1::2] = torch.cos(position * div_term)
+
+        self.emb = nn.Embedding(c_in, d_model)
+        self.emb.weight = nn.Parameter(w, requires_grad=False)
+
+    def forward(self, x):
+        return self.emb(x).detach()
+
+class TemporalEmbedding(nn.Module):
+    def __init__(self, d_model, embed_type='fixed', freq='h'):
+        super(TemporalEmbedding, self).__init__()
+
+        minute_size = 4; hour_size = 24
+        weekday_size = 7; day_size = 32; month_size = 13
+
+        Embed = FixedEmbedding if embed_type=='fixed' else nn.Embedding
+        if freq=='t':
+            self.minute_embed = Embed(minute_size, d_model)
+        self.hour_embed = Embed(hour_size, d_model)
+        self.weekday_embed = Embed(weekday_size, d_model)
+        self.day_embed = Embed(day_size, d_model)
+        self.month_embed = Embed(month_size, d_model)
+    
+    def forward(self, x):
+        x = x.long()
+        
+        minute_x = self.minute_embed(x[:,:,4]) if hasattr(self, 'minute_embed') else 0.
+        hour_x = self.hour_embed(x[:,:,3])
+        weekday_x = self.weekday_embed(x[:,:,2])
+        day_x = self.day_embed(x[:,:,1])
+        month_x = self.month_embed(x[:,:,0])
+        
+        return hour_x + weekday_x + day_x + month_x + minute_x
+
+class TimeFeatureEmbedding(nn.Module):
+    def __init__(self, d_model, embed_type='timeF', freq='h'):
+        super(TimeFeatureEmbedding, self).__init__()
+
+        freq_map = {'h':4, 't':5, 's':6, 'm':1, 'a':1, 'w':2, 'd':3, 'b':3}
+        d_inp = freq_map[freq]
+        self.embed = nn.Linear(d_inp, d_model)
+    
+    def forward(self, x):
+        return self.embed(x)
+
+class DataEmbedding(nn.Module):
+    def __init__(self, c_in, d_model, embed_type='fixed', freq='h', dropout=0.1):
+        super(DataEmbedding, self).__init__()
+
+        self.value_embedding = TokenEmbedding(c_in=c_in, d_model=d_model)
+        self.position_embedding = PositionalEmbedding(d_model=d_model)
+        self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq) if embed_type!='timeF' else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
+
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x, x_mark):
+        x = self.value_embedding(x) + self.position_embedding(x) + self.temporal_embedding(x_mark)
+        
+        return self.dropout(x)
+
+================
+File: models/encoder.py
+================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ConvLayer(nn.Module):
+    def __init__(self, c_in):
+        super(ConvLayer, self).__init__()
+        padding = 1 if torch.__version__>='1.5.0' else 2
+        self.downConv = nn.Conv1d(in_channels=c_in,
+                                  out_channels=c_in,
+                                  kernel_size=3,
+                                  padding=padding,
+                                  padding_mode='circular')
+        self.norm = nn.BatchNorm1d(c_in)
+        self.activation = nn.ELU()
+        self.maxPool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+
+    def forward(self, x):
+        x = self.downConv(x.permute(0, 2, 1))
+        x = self.norm(x)
+        x = self.activation(x)
+        x = self.maxPool(x)
+        x = x.transpose(1,2)
+        return x
+
+class EncoderLayer(nn.Module):
+    def __init__(self, attention, d_model, d_ff=None, dropout=0.1, activation="relu"):
+        super(EncoderLayer, self).__init__()
+        d_ff = d_ff or 4*d_model
+        self.attention = attention
+        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = F.relu if activation == "relu" else F.gelu
+
+    def forward(self, x, attn_mask=None):
+        # x [B, L, D]
+        # x = x + self.dropout(self.attention(
+        #     x, x, x,
+        #     attn_mask = attn_mask
+        # ))
+        new_x, attn = self.attention(
+            x, x, x,
+            attn_mask = attn_mask
+        )
+        x = x + self.dropout(new_x)
+
+        y = x = self.norm1(x)
+        y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
+        y = self.dropout(self.conv2(y).transpose(-1,1))
+
+        return self.norm2(x+y), attn
+
+class Encoder(nn.Module):
+    def __init__(self, attn_layers, conv_layers=None, norm_layer=None):
+        super(Encoder, self).__init__()
+        self.attn_layers = nn.ModuleList(attn_layers)
+        self.conv_layers = nn.ModuleList(conv_layers) if conv_layers is not None else None
+        self.norm = norm_layer
+
+    def forward(self, x, attn_mask=None):
+        # x [B, L, D]
+        attns = []
+        if self.conv_layers is not None:
+            for attn_layer, conv_layer in zip(self.attn_layers, self.conv_layers):
+                x, attn = attn_layer(x, attn_mask=attn_mask)
+                x = conv_layer(x)
+                attns.append(attn)
+            x, attn = self.attn_layers[-1](x, attn_mask=attn_mask)
+            attns.append(attn)
+        else:
+            for attn_layer in self.attn_layers:
+                x, attn = attn_layer(x, attn_mask=attn_mask)
+                attns.append(attn)
+
+        if self.norm is not None:
+            x = self.norm(x)
+
+        return x, attns
+
+class EncoderStack(nn.Module):
+    def __init__(self, encoders, inp_lens):
+        super(EncoderStack, self).__init__()
+        self.encoders = nn.ModuleList(encoders)
+        self.inp_lens = inp_lens
+
+    def forward(self, x, attn_mask=None):
+        # x [B, L, D]
+        x_stack = []; attns = []
+        for i_len, encoder in zip(self.inp_lens, self.encoders):
+            inp_len = x.shape[1]//(2**i_len)
+            x_s, attn = encoder(x[:, -inp_len:, :])
+            x_stack.append(x_s); attns.append(attn)
+        x_stack = torch.cat(x_stack, -2)
+        
+        return x_stack, attns
+
+================
+File: models/model.py
+================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from utils.masking import TriangularCausalMask, ProbMask
+from models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack
+from models.decoder import Decoder, DecoderLayer
+from models.attn import FullAttention, ProbAttention, AttentionLayer
+from models.embed import DataEmbedding
+
+class Informer(nn.Module):
+    def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
+                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu', 
+                output_attention = False, distil=True, mix=True,
+                device=torch.device('cuda:0')):
+        super(Informer, self).__init__()
+        self.pred_len = out_len
+        self.attn = attn
+        self.output_attention = output_attention
+
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout)
+        self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout)
+        # Attention
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        # Encoder
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation
+                ) for l in range(e_layers)
+            ],
+            [
+                ConvLayer(
+                    d_model
+                ) for l in range(e_layers-1)
+            ] if distil else None,
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # Decoder
+        self.decoder = Decoder(
+            [
+                DecoderLayer(
+                    AttentionLayer(Attn(True, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=mix),
+                    AttentionLayer(FullAttention(False, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                )
+                for l in range(d_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # self.end_conv1 = nn.Conv1d(in_channels=label_len+out_len, out_channels=out_len, kernel_size=1, bias=True)
+        # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
+        self.projection = nn.Linear(d_model, c_out, bias=True)
+        
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, 
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+        enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+
+        dec_out = self.dec_embedding(x_dec, x_mark_dec)
+        dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
+        dec_out = self.projection(dec_out)
+        
+        # dec_out = self.end_conv1(dec_out)
+        # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
+        if self.output_attention:
+            return dec_out[:,-self.pred_len:,:], attns
+        else:
+            return dec_out[:,-self.pred_len:,:] # [B, L, D]
+
+
+class InformerStack(nn.Module):
+    def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=[3,2,1], d_layers=2, d_ff=512, 
+                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu',
+                output_attention = False, distil=True, mix=True,
+                device=torch.device('cuda:0')):
+        super(InformerStack, self).__init__()
+        self.pred_len = out_len
+        self.attn = attn
+        self.output_attention = output_attention
+
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout)
+        self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout)
+        # Attention
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        # Encoder
+
+        inp_lens = list(range(len(e_layers))) # [0,1,2,...] you can customize here
+        encoders = [
+            Encoder(
+                [
+                    EncoderLayer(
+                        AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                    d_model, n_heads, mix=False),
+                        d_model,
+                        d_ff,
+                        dropout=dropout,
+                        activation=activation
+                    ) for l in range(el)
+                ],
+                [
+                    ConvLayer(
+                        d_model
+                    ) for l in range(el-1)
+                ] if distil else None,
+                norm_layer=torch.nn.LayerNorm(d_model)
+            ) for el in e_layers]
+        self.encoder = EncoderStack(encoders, inp_lens)
+        # Decoder
+        self.decoder = Decoder(
+            [
+                DecoderLayer(
+                    AttentionLayer(Attn(True, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=mix),
+                    AttentionLayer(FullAttention(False, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                )
+                for l in range(d_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # self.end_conv1 = nn.Conv1d(in_channels=label_len+out_len, out_channels=out_len, kernel_size=1, bias=True)
+        # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
+        self.projection = nn.Linear(d_model, c_out, bias=True)
+        
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, 
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+        enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+
+        dec_out = self.dec_embedding(x_dec, x_mark_dec)
+        dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
+        dec_out = self.projection(dec_out)
+        
+        # dec_out = self.end_conv1(dec_out)
+        # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
+        if self.output_attention:
+            return dec_out[:,-self.pred_len:,:], attns
+        else:
+            return dec_out[:,-self.pred_len:,:] # [B, L, D]
+
+================
+File: scripts/ETTh1.sh
+================
+### M
+
+python -u main_informer.py --model informer --data ETTh1 --features M --seq_len 48 --label_len 48 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5 --factor 3
+
+python -u main_informer.py --model informer --data ETTh1 --features M --seq_len 96 --label_len 48 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features M --seq_len 168 --label_len 168 --pred_len 168 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features M --seq_len 168 --label_len 168 --pred_len 336 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features M --seq_len 336 --label_len 336 --pred_len 720 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+### S
+
+python -u main_informer.py --model informer --data ETTh1 --features S --seq_len 720 --label_len 168 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features S --seq_len 720 --label_len 168 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features S --seq_len 720 --label_len 336 --pred_len 168 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features S --seq_len 720 --label_len 336 --pred_len 336 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh1 --features S --seq_len 720 --label_len 336 --pred_len 720 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+================
+File: scripts/ETTh2.sh
+================
+### M
+
+python -u main_informer.py --model informer --data ETTh2 --features M --seq_len 48 --label_len 48 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features M --seq_len 96 --label_len 96 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features M --seq_len 336 --label_len 336 --pred_len 168 --e_layers 3 --d_layers 2 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features M --seq_len 336 --label_len 168 --pred_len 336 --e_layers 3 --d_layers 2 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features M --seq_len 720 --label_len 336 --pred_len 720 --e_layers 3 --d_layers 2 --attn prob --des 'Exp' --itr 5
+
+### S
+
+python -u main_informer.py --model informer --data ETTh2 --features S --seq_len 48 --label_len 48 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5 --factor 3
+
+python -u main_informer.py --model informer --data ETTh2 --features S --seq_len 96 --label_len 96 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features S --seq_len 336 --label_len 336 --pred_len 168 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features S --seq_len 336 --label_len 168 --pred_len 336 --e_layers 3 --d_layers 2 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTh2 --features S --seq_len 336 --label_len 336 --pred_len 720 --e_layers 3 --d_layers 2 --attn prob --des 'Exp' --itr 5
+
+================
+File: scripts/ETTm1.sh
+================
+### M
+
+python -u main_informer.py --model informer --data ETTm1 --features M --seq_len 672 --label_len 96 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features M --seq_len 96 --label_len 48 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features M --seq_len 384 --label_len 384 --pred_len 96 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features M --seq_len 672 --label_len 288 --pred_len 288 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features M --seq_len 672 --label_len 384 --pred_len 672 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+### S
+
+python -u main_informer.py --model informer --data ETTm1 --features S --seq_len 96 --label_len 48 --pred_len 24 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features S --seq_len 96 --label_len 48 --pred_len 48 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features S --seq_len 384 --label_len 384 --pred_len 96 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features S --seq_len 384 --label_len 384 --pred_len 288 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+python -u main_informer.py --model informer --data ETTm1 --features S --seq_len 384 --label_len 384 --pred_len 672 --e_layers 2 --d_layers 1 --attn prob --des 'Exp' --itr 5
+
+================
+File: scripts/WTH.sh
+================
+### M
+python -u main_informer.py --model informer --data WTH --features M --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 168 --pred_len 24 --seq_len 168 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features M --attn prob --d_layers 1 --e_layers 2 --itr 3 --label_len 96 --pred_len 48 --seq_len 96 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features M --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 168 --pred_len 168 --seq_len 336 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features M --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 168 --pred_len 336 --seq_len 720 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features M --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 336 --pred_len 720 --seq_len 720 --des 'Exp'
+
+### S
+python -u main_informer.py --model informer --data WTH --features S --attn prob --d_layers 1 --e_layers 2 --itr 3 --label_len 168 --pred_len 24 --seq_len 720 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features S --attn prob --d_layers 1 --e_layers 2 --itr 3 --label_len 168 --pred_len 48 --seq_len 720 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features S --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 168 --pred_len 168 --seq_len 168 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features S --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 336 --pred_len 336 --seq_len 336 --des 'Exp'
+
+python -u main_informer.py --model informer --data WTH --features S --attn prob --d_layers 2 --e_layers 3 --itr 3 --label_len 336 --pred_len 720 --seq_len 720 --des 'Exp'
+
+================
+File: utils/masking.py
+================
+import torch
+
+class TriangularCausalMask():
+    def __init__(self, B, L, device="cpu"):
+        mask_shape = [B, 1, L, L]
+        with torch.no_grad():
+            self._mask = torch.triu(torch.ones(mask_shape, dtype=torch.bool), diagonal=1).to(device)
+
+    @property
+    def mask(self):
+        return self._mask
+
+class ProbMask():
+    def __init__(self, B, H, L, index, scores, device="cpu"):
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1)
+        _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
+        indicator = _mask_ex[torch.arange(B)[:, None, None],
+                             torch.arange(H)[None, :, None],
+                             index, :].to(device)
+        self._mask = indicator.view(scores.shape).to(device)
+    
+    @property
+    def mask(self):
+        return self._mask
+
+================
+File: utils/metrics.py
+================
+import numpy as np
+
+def RSE(pred, true):
+    return np.sqrt(np.sum((true-pred)**2)) / np.sqrt(np.sum((true-true.mean())**2))
+
+def CORR(pred, true):
+    u = ((true-true.mean(0))*(pred-pred.mean(0))).sum(0) 
+    d = np.sqrt(((true-true.mean(0))**2*(pred-pred.mean(0))**2).sum(0))
+    return (u/d).mean(-1)
+
+def MAE(pred, true):
+    return np.mean(np.abs(pred-true))
+
+def MSE(pred, true):
+    return np.mean((pred-true)**2)
+
+def RMSE(pred, true):
+    return np.sqrt(MSE(pred, true))
+
+def MAPE(pred, true):
+    return np.mean(np.abs((pred - true) / true))
+
+def MSPE(pred, true):
+    return np.mean(np.square((pred - true) / true))
+
+def metric(pred, true):
+    mae = MAE(pred, true)
+    mse = MSE(pred, true)
+    rmse = RMSE(pred, true)
+    mape = MAPE(pred, true)
+    mspe = MSPE(pred, true)
+    
+    return mae,mse,rmse,mape,mspe
+
+================
+File: utils/timefeatures.py
+================
+from typing import List
+
+import numpy as np
+import pandas as pd
+from pandas.tseries import offsets
+from pandas.tseries.frequencies import to_offset
+
+class TimeFeature:
+    def __init__(self):
+        pass
+
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        pass
+
+    def __repr__(self):
+        return self.__class__.__name__ + "()"
+
+class SecondOfMinute(TimeFeature):
+    """Minute of hour encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return index.second / 59.0 - 0.5
+
+class MinuteOfHour(TimeFeature):
+    """Minute of hour encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return index.minute / 59.0 - 0.5
+
+class HourOfDay(TimeFeature):
+    """Hour of day encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return index.hour / 23.0 - 0.5
+
+class DayOfWeek(TimeFeature):
+    """Hour of day encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return index.dayofweek / 6.0 - 0.5
+
+class DayOfMonth(TimeFeature):
+    """Day of month encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return (index.day - 1) / 30.0 - 0.5
+
+class DayOfYear(TimeFeature):
+    """Day of year encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return (index.dayofyear - 1) / 365.0 - 0.5
+
+class MonthOfYear(TimeFeature):
+    """Month of year encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return (index.month - 1) / 11.0 - 0.5
+
+class WeekOfYear(TimeFeature):
+    """Week of year encoded as value between [-0.5, 0.5]"""
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return (index.week - 1) / 52.0 - 0.5
+
+def time_features_from_frequency_str(freq_str: str) -> List[TimeFeature]:
+    """
+    Returns a list of time features that will be appropriate for the given frequency string.
+    Parameters
+    ----------
+    freq_str
+        Frequency string of the form [multiple][granularity] such as "12H", "5min", "1D" etc.
+    """
+
+    features_by_offsets = {
+        offsets.YearEnd: [],
+        offsets.QuarterEnd: [MonthOfYear],
+        offsets.MonthEnd: [MonthOfYear],
+        offsets.Week: [DayOfMonth, WeekOfYear],
+        offsets.Day: [DayOfWeek, DayOfMonth, DayOfYear],
+        offsets.BusinessDay: [DayOfWeek, DayOfMonth, DayOfYear],
+        offsets.Hour: [HourOfDay, DayOfWeek, DayOfMonth, DayOfYear],
+        offsets.Minute: [
+            MinuteOfHour,
+            HourOfDay,
+            DayOfWeek,
+            DayOfMonth,
+            DayOfYear,
+        ],
+        offsets.Second: [
+            SecondOfMinute,
+            MinuteOfHour,
+            HourOfDay,
+            DayOfWeek,
+            DayOfMonth,
+            DayOfYear,
+        ],
+    }
+
+    offset = to_offset(freq_str)
+
+    for offset_type, feature_classes in features_by_offsets.items():
+        if isinstance(offset, offset_type):
+            return [cls() for cls in feature_classes]
+
+    supported_freq_msg = f"""
+    Unsupported frequency {freq_str}
+    The following frequencies are supported:
+        Y   - yearly
+            alias: A
+        M   - monthly
+        W   - weekly
+        D   - daily
+        B   - business days
+        H   - hourly
+        T   - minutely
+            alias: min
+        S   - secondly
+    """
+    raise RuntimeError(supported_freq_msg)
+
+def time_features(dates, timeenc=1, freq='h'):
+    """
+    > `time_features` takes in a `dates` dataframe with a 'dates' column and extracts the date down to `freq` where freq can be any of the following if `timeenc` is 0: 
+    > * m - [month]
+    > * w - [month]
+    > * d - [month, day, weekday]
+    > * b - [month, day, weekday]
+    > * h - [month, day, weekday, hour]
+    > * t - [month, day, weekday, hour, *minute]
+    > 
+    > If `timeenc` is 1, a similar, but different list of `freq` values are supported (all encoded between [-0.5 and 0.5]): 
+    > * Q - [month]
+    > * M - [month]
+    > * W - [Day of month, week of year]
+    > * D - [Day of week, day of month, day of year]
+    > * B - [Day of week, day of month, day of year]
+    > * H - [Hour of day, day of week, day of month, day of year]
+    > * T - [Minute of hour*, hour of day, day of week, day of month, day of year]
+    > * S - [Second of minute, minute of hour, hour of day, day of week, day of month, day of year]
+
+    *minute returns a number from 0-3 corresponding to the 15 minute period it falls into.
+    """
+    if timeenc==0:
+        dates['month'] = dates.date.apply(lambda row:row.month,1)
+        dates['day'] = dates.date.apply(lambda row:row.day,1)
+        dates['weekday'] = dates.date.apply(lambda row:row.weekday(),1)
+        dates['hour'] = dates.date.apply(lambda row:row.hour,1)
+        dates['minute'] = dates.date.apply(lambda row:row.minute,1)
+        dates['minute'] = dates.minute.map(lambda x:x//15)
+        freq_map = {
+            'y':[],'m':['month'],'w':['month'],'d':['month','day','weekday'],
+            'b':['month','day','weekday'],'h':['month','day','weekday','hour'],
+            't':['month','day','weekday','hour','minute'],
+        }
+        return dates[freq_map[freq.lower()]].values
+    if timeenc==1:
+        dates = pd.to_datetime(dates.date.values)
+        return np.vstack([feat(dates) for feat in time_features_from_frequency_str(freq)]).transpose(1,0)
+
+================
+File: utils/tools.py
+================
+import numpy as np
+import torch
+
+def adjust_learning_rate(optimizer, epoch, args):
+    # lr = args.learning_rate * (0.2 ** (epoch // 2))
+    if args.lradj=='type1':
+        lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch-1) // 1))}
+    elif args.lradj=='type2':
+        lr_adjust = {
+            2: 5e-5, 4: 1e-5, 6: 5e-6, 8: 1e-6, 
+            10: 5e-7, 15: 1e-7, 20: 5e-8
+        }
+    if epoch in lr_adjust.keys():
+        lr = lr_adjust[epoch]
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        print('Updating learning rate to {}'.format(lr))
+
+class EarlyStopping:
+    def __init__(self, patience=7, verbose=False, delta=0):
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+
+    def __call__(self, val_loss, model, path):
+        score = -val_loss
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model, path)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model, path)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model, path):
+        if self.verbose:
+            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+        torch.save(model.state_dict(), path+'/'+'checkpoint.pth')
+        self.val_loss_min = val_loss
+
+class dotdict(dict):
+    """dot.notation access to dictionary attributes"""
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+class StandardScaler():
+    def __init__(self):
+        self.mean = 0.
+        self.std = 1.
+    
+    def fit(self, data):
+        self.mean = data.mean(0)
+        self.std = data.std(0)
+
+    def transform(self, data):
+        mean = torch.from_numpy(self.mean).type_as(data).to(data.device) if torch.is_tensor(data) else self.mean
+        std = torch.from_numpy(self.std).type_as(data).to(data.device) if torch.is_tensor(data) else self.std
+        return (data - mean) / std
+
+    def inverse_transform(self, data):
+        mean = torch.from_numpy(self.mean).type_as(data).to(data.device) if torch.is_tensor(data) else self.mean
+        std = torch.from_numpy(self.std).type_as(data).to(data.device) if torch.is_tensor(data) else self.std
+        if data.shape[-1] != mean.shape[-1]:
+            mean = mean[-1:]
+            std = std[-1:]
+        return (data * std) + mean
+
+================
+File: Dockerfile
+================
+FROM continuumio/miniconda3:4.7.12
+
+ADD ./environment.yml ./environment.yml
+
+RUN conda install -n base -c conda-forge mamba && \
+    mamba env update -n base -f ./environment.yml && \
+    conda clean -afy
+
+================
+File: environment.yml
+================
+name: regional_pmm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.6
+  - pip
+  - matplotlib==3.1.1
+  - numpy==1.19.4
+  - pandas==0.25.1
+  - scikit-learn==0.21.3
+  - pytorch==1.8.0
+
+================
+File: LICENSE
+================
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+================
+File: main_informer.py
+================
+import argparse
+import os
+import torch
+
+from exp.exp_informer import Exp_Informer
+
+parser = argparse.ArgumentParser(description='[Informer] Long Sequences Forecasting')
+
+parser.add_argument('--model', type=str, required=True, default='informer',help='model of experiment, options: [informer, informerstack, informerlight(TBD)]')
+
+parser.add_argument('--data', type=str, required=True, default='ETTh1', help='data')
+parser.add_argument('--root_path', type=str, default='./data/ETT/', help='root path of the data file')
+parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')    
+parser.add_argument('--features', type=str, default='M', help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
+parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
+parser.add_argument('--freq', type=str, default='h', help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
+parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='location of model checkpoints')
+
+parser.add_argument('--seq_len', type=int, default=96, help='input sequence length of Informer encoder')
+parser.add_argument('--label_len', type=int, default=48, help='start token length of Informer decoder')
+parser.add_argument('--pred_len', type=int, default=24, help='prediction sequence length')
+# Informer decoder input: concat[start token series(label_len), zero padding series(pred_len)]
+
+parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
+parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
+parser.add_argument('--c_out', type=int, default=7, help='output size')
+parser.add_argument('--d_model', type=int, default=512, help='dimension of model')
+parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
+parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
+parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
+parser.add_argument('--s_layers', type=str, default='3,2,1', help='num of stack encoder layers')
+parser.add_argument('--d_ff', type=int, default=2048, help='dimension of fcn')
+parser.add_argument('--factor', type=int, default=5, help='probsparse attn factor')
+parser.add_argument('--padding', type=int, default=0, help='padding type')
+parser.add_argument('--distil', action='store_false', help='whether to use distilling in encoder, using this argument means not using distilling', default=True)
+parser.add_argument('--dropout', type=float, default=0.05, help='dropout')
+parser.add_argument('--attn', type=str, default='prob', help='attention used in encoder, options:[prob, full]')
+parser.add_argument('--embed', type=str, default='timeF', help='time features encoding, options:[timeF, fixed, learned]')
+parser.add_argument('--activation', type=str, default='gelu',help='activation')
+parser.add_argument('--output_attention', action='store_true', help='whether to output attention in ecoder')
+parser.add_argument('--do_predict', action='store_true', help='whether to predict unseen future data')
+parser.add_argument('--mix', action='store_false', help='use mix attention in generative decoder', default=True)
+parser.add_argument('--cols', type=str, nargs='+', help='certain cols from the data files as the input features')
+parser.add_argument('--num_workers', type=int, default=0, help='data loader num workers')
+parser.add_argument('--itr', type=int, default=2, help='experiments times')
+parser.add_argument('--train_epochs', type=int, default=6, help='train epochs')
+parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
+parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
+parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
+parser.add_argument('--des', type=str, default='test',help='exp description')
+parser.add_argument('--loss', type=str, default='mse',help='loss function')
+parser.add_argument('--lradj', type=str, default='type1',help='adjust learning rate')
+parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
+parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
+
+parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
+parser.add_argument('--gpu', type=int, default=0, help='gpu')
+parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
+parser.add_argument('--devices', type=str, default='0,1,2,3',help='device ids of multile gpus')
+
+args = parser.parse_args()
+
+args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
+
+if args.use_gpu and args.use_multi_gpu:
+    args.devices = args.devices.replace(' ','')
+    device_ids = args.devices.split(',')
+    args.device_ids = [int(id_) for id_ in device_ids]
+    args.gpu = args.device_ids[0]
+
+data_parser = {
+    'ETTh1':{'data':'ETTh1.csv','T':'OT','M':[7,7,7],'S':[1,1,1],'MS':[7,7,1]},
+    'ETTh2':{'data':'ETTh2.csv','T':'OT','M':[7,7,7],'S':[1,1,1],'MS':[7,7,1]},
+    'ETTm1':{'data':'ETTm1.csv','T':'OT','M':[7,7,7],'S':[1,1,1],'MS':[7,7,1]},
+    'ETTm2':{'data':'ETTm2.csv','T':'OT','M':[7,7,7],'S':[1,1,1],'MS':[7,7,1]},
+    'WTH':{'data':'WTH.csv','T':'WetBulbCelsius','M':[12,12,12],'S':[1,1,1],'MS':[12,12,1]},
+    'ECL':{'data':'ECL.csv','T':'MT_320','M':[321,321,321],'S':[1,1,1],'MS':[321,321,1]},
+    'Solar':{'data':'solar_AL.csv','T':'POWER_136','M':[137,137,137],'S':[1,1,1],'MS':[137,137,1]},
+}
+if args.data in data_parser.keys():
+    data_info = data_parser[args.data]
+    args.data_path = data_info['data']
+    args.target = data_info['T']
+    args.enc_in, args.dec_in, args.c_out = data_info[args.features]
+
+args.s_layers = [int(s_l) for s_l in args.s_layers.replace(' ','').split(',')]
+args.detail_freq = args.freq
+args.freq = args.freq[-1:]
+
+print('Args in experiment:')
+print(args)
+
+Exp = Exp_Informer
+
+for ii in range(args.itr):
+    # setting record of experiments
+    setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_at{}_fc{}_eb{}_dt{}_mx{}_{}_{}'.format(args.model, args.data, args.features, 
+                args.seq_len, args.label_len, args.pred_len,
+                args.d_model, args.n_heads, args.e_layers, args.d_layers, args.d_ff, args.attn, args.factor, 
+                args.embed, args.distil, args.mix, args.des, ii)
+
+    exp = Exp(args) # set experiments
+    print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
+    exp.train(setting)
+    
+    print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+    exp.test(setting)
+
+    if args.do_predict:
+        print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+        exp.predict(setting, True)
+
+    torch.cuda.empty_cache()
+
+================
+File: Makefile
+================
+IMAGE := informer
+ROOT := $(shell dirname $(realpath $(firstword ${MAKEFILE_LIST})))
+PARENT_ROOT := $(shell dirname ${ROOT})
+PORT := 8888
+
+DOCKER_PARAMETERS := \
+	--user $(shell id -u) \
+	-v ${ROOT}:/app \
+	-w /app \
+	-e HOME=/tmp
+
+init:
+	docker build -t ${IMAGE} .
+
+dataset:
+	mkdir -p data/ETT && \
+		wget -O data/ETT/ETTh1.csv https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv && \
+		wget -O data/ETT/ETTh2.csv https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh2.csv && \
+		wget -O data/ETT/ETTm1.csv https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm1.csv && \
+		wget -O data/ETT/ETTm2.csv https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm2.csv && \
+		wget -O data/ETT/ECL.csv "https://drive.google.com/uc?export=download&id=1rUPdR7R2iWFW-LMoDdHoO2g4KgnkpFzP" && \
+		wget -O data/ETT/WTH.csv "https://drive.google.com/uc?export=download&id=1UBRz-aM_57i_KCC-iaSWoKDPTGGv6EaG"
+
+jupyter:
+	docker run -d --rm ${DOCKER_PARAMETERS} -e HOME=/tmp -p ${PORT}:8888 ${IMAGE} \
+		bash -c "jupyter lab --ip=0.0.0.0 --no-browser --NotebookApp.token=''"
+
+run_module: .require-module
+	docker run -i --rm ${DOCKER_PARAMETERS} \
+		${IMAGE} ${module}
+
+bash_docker:
+	docker run -it --rm ${DOCKER_PARAMETERS} ${IMAGE}
+
+.require-module:
+ifndef module
+	$(error module is required)
+endif
+
+================
+File: README.md
+================
+# Informer: Beyond Efficient Transformer for Long Sequence Time-Series Forecasting (AAAI'21 Best Paper)
+![Python 3.6](https://img.shields.io/badge/python-3.6-green.svg?style=plastic)
+![PyTorch 1.2](https://img.shields.io/badge/PyTorch%20-%23EE4C2C.svg?style=plastic)
+![cuDNN 7.3.1](https://img.shields.io/badge/cudnn-7.3.1-green.svg?style=plastic)
+![License CC BY-NC-SA](https://img.shields.io/badge/license-CC_BY--NC--SA--green.svg?style=plastic)
+
+This is the origin Pytorch implementation of Informer in the following paper: 
+[Informer: Beyond Efficient Transformer for Long Sequence Time-Series Forecasting](https://arxiv.org/abs/2012.07436). Special thanks to `Jieqi Peng`@[cookieminions](https://github.com/cookieminions) for building this repo.
+
+:triangular_flag_on_post:**News**(Mar 27, 2023): We will release Informer V2 soon.
+
+:triangular_flag_on_post:**News**(Feb 28, 2023): The Informer's [extension paper](https://www.sciencedirect.com/science/article/pii/S0004370223000322) is online on AIJ.
+
+:triangular_flag_on_post:**News**(Mar 25, 2021): We update all experiment [results](#resultslink) with hyperparameter settings.
+
+:triangular_flag_on_post:**News**(Feb 22, 2021): We provide [Colab Examples](#colablink) for friendly usage.
+
+:triangular_flag_on_post:**News**(Feb 8, 2021): Our Informer paper has been awarded [AAAI'21 Best Paper \[Official\]](https://aaai.org/Conferences/AAAI-21/aaai-outstanding-and-distinguished-papers/)[\[Beihang\]](http://scse.buaa.edu.cn/info/1097/7443.htm)[\[Rutgers\]](https://www.business.rutgers.edu/news/hui-xiong-and-research-colleagues-receive-aaai-best-paper-award)! We will continue this line of research and update on this repo. Please star this repo and [cite](#citelink) our paper if you find our work is helpful for you.
+
+<p align="center">
+<img src=".\img\informer.png" height = "360" alt="" align=center />
+<br><br>
+<b>Figure 1.</b> The architecture of Informer.
+</p>
+
+## ProbSparse Attention
+The self-attention scores form a long-tail distribution, where the "active" queries lie in the "head" scores and "lazy" queries lie in the "tail" area. We designed the ProbSparse Attention to select the "active" queries rather than the "lazy" queries. The ProbSparse Attention with Top-u queries forms a sparse Transformer by the probability distribution.
+`Why not use Top-u keys?` The self-attention layer's output is the re-represent of input. It is formulated as a weighted combination of values w.r.t. the score of dot-product pairs. The top queries with full keys encourage a complete re-represent of leading components in the input, and it is equivalent to selecting the "head" scores among all the dot-product pairs. If we choose Top-u keys, the full keys just preserve the trivial sum of values within the "long tail" scores but wreck the leading components' re-represent.
+<p align="center">
+<img src=".\img\probsparse_intro.png" height = "320" alt="" align=center />
+<br><br>
+<b>Figure 2.</b> The illustration of ProbSparse Attention.
+</p>
+
+## Requirements
+
+- Python 3.6
+- matplotlib == 3.1.1
+- numpy == 1.19.4
+- pandas == 0.25.1
+- scikit_learn == 0.21.3
+- torch == 1.8.0
+
+Dependencies can be installed using the following command:
+```bash
+pip install -r requirements.txt
+```
+
+## Data
+
+The ETT dataset used in the paper can be downloaded in the repo [ETDataset](https://github.com/zhouhaoyi/ETDataset).
+The required data files should be put into `data/ETT/` folder. A demo slice of the ETT data is illustrated in the following figure. Note that the input of each dataset is zero-mean normalized in this implementation.
+
+<p align="center">
+<img src="./img/data.png" height = "168" alt="" align=center />
+<br><br>
+<b>Figure 3.</b> An example of the ETT data.
+</p>
+
+The ECL data and Weather data can be downloaded here.
+- [Google Drive](https://drive.google.com/drive/folders/1ohGYWWohJlOlb2gsGTeEq3Wii2egnEPR?usp=sharing)
+- [BaiduPan](https://pan.baidu.com/s/1wyaGUisUICYHnfkZzWCwyA), password: 6gan 
+
+## Reproducibility
+
+To easily reproduce the results you can follow the next steps:
+1. Initialize the docker image using: `make init`.
+2. Download the datasets using: `make dataset`.
+3. Run each script in `scripts/` using `make run_module module="bash ETTh1.sh"` for each script.
+4. Alternatively, run all the scripts at once:
+```
+for file in `ls scripts`; do make run_module module="bash scripts/$script"; done
+```
+
+## Usage
+<span id="colablink">Colab Examples:</span> We provide google colabs to help reproduce and customize our repo, which includes `experiments(train and test)`, `prediction`, `visualization` and `custom data`.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1_X7O2BkFLvqyCdZzDZvV2MB0aAvYALLC)
+
+Commands for training and testing the model with *ProbSparse* self-attention on Dataset ETTh1, ETTh2 and ETTm1 respectively:
+
+```bash
+# ETTh1
+python -u main_informer.py --model informer --data ETTh1 --attn prob --freq h
+
+# ETTh2
+python -u main_informer.py --model informer --data ETTh2 --attn prob --freq h
+
+# ETTm1
+python -u main_informer.py --model informer --data ETTm1 --attn prob --freq t
+```
+
+More parameter information please refer to `main_informer.py`.
+
+We provide a more detailed and complete command description for training and testing the model:
+
+```python
+python -u main_informer.py --model <model> --data <data>
+--root_path <root_path> --data_path <data_path> --features <features>
+--target <target> --freq <freq> --checkpoints <checkpoints>
+--seq_len <seq_len> --label_len <label_len> --pred_len <pred_len>
+--enc_in <enc_in> --dec_in <dec_in> --c_out <c_out> --d_model <d_model>
+--n_heads <n_heads> --e_layers <e_layers> --d_layers <d_layers>
+--s_layers <s_layers> --d_ff <d_ff> --factor <factor> --padding <padding>
+--distil --dropout <dropout> --attn <attn> --embed <embed> --activation <activation>
+--output_attention --do_predict --mix --cols <cols> --itr <itr>
+--num_workers <num_workers> --train_epochs <train_epochs>
+--batch_size <batch_size> --patience <patience> --des <des>
+--learning_rate <learning_rate> --loss <loss> --lradj <lradj>
+--use_amp --inverse --use_gpu <use_gpu> --gpu <gpu> --use_multi_gpu --devices <devices>
+```
+
+The detailed descriptions about the arguments are as following:
+
+| Parameter name | Description of parameter |
+| --- | --- |
+| model | The model of experiment. This can be set to `informer`, `informerstack`, `informerlight(TBD)` |
+| data           | The dataset name                                             |
+| root_path      | The root path of the data file (defaults to `./data/ETT/`)    |
+| data_path      | The data file name (defaults to `ETTh1.csv`)                  |
+| features       | The forecasting task (defaults to `M`). This can be set to `M`,`S`,`MS` (M : multivariate predict multivariate, S : univariate predict univariate, MS : multivariate predict univariate) |
+| target         | Target feature in S or MS task (defaults to `OT`)             |
+| freq           | Freq for time features encoding (defaults to `h`). This can be set to `s`,`t`,`h`,`d`,`b`,`w`,`m` (s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly).You can also use more detailed freq like 15min or 3h |
+| checkpoints    | Location of model checkpoints (defaults to `./checkpoints/`)  |
+| seq_len | Input sequence length of Informer encoder (defaults to 96) |
+| label_len | Start token length of Informer decoder (defaults to 48) |
+| pred_len | Prediction sequence length (defaults to 24) |
+| enc_in | Encoder input size (defaults to 7) |
+| dec_in | Decoder input size (defaults to 7) |
+| c_out | Output size (defaults to 7) |
+| d_model | Dimension of model (defaults to 512) |
+| n_heads | Num of heads (defaults to 8) |
+| e_layers | Num of encoder layers (defaults to 2) |
+| d_layers | Num of decoder layers (defaults to 1) |
+| s_layers | Num of stack encoder layers (defaults to `3,2,1`) |
+| d_ff | Dimension of fcn (defaults to 2048) |
+| factor | Probsparse attn factor (defaults to 5) |
+| padding | Padding type(defaults to 0). |
+| distil | Whether to use distilling in encoder, using this argument means not using distilling (defaults to `True`) |
+| dropout | The probability of dropout (defaults to 0.05) |
+| attn | Attention used in encoder (defaults to `prob`). This can be set to `prob` (informer), `full` (transformer) |
+| embed | Time features encoding (defaults to `timeF`). This can be set to `timeF`, `fixed`, `learned` |
+| activation | Activation function (defaults to `gelu`) |
+| output_attention | Whether to output attention in encoder, using this argument means outputing attention (defaults to `False`) |
+| do_predict | Whether to predict unseen future data, using this argument means making predictions (defaults to `False`) |
+| mix | Whether to use mix attention in generative decoder, using this argument means not using mix attention (defaults to `True`) |
+| cols | Certain cols from the data files as the input features |
+| num_workers | The num_works of Data loader (defaults to 0) |
+| itr | Experiments times (defaults to 2) |
+| train_epochs | Train epochs (defaults to 6) |
+| batch_size | The batch size of training input data (defaults to 32) |
+| patience | Early stopping patience (defaults to 3) |
+| learning_rate | Optimizer learning rate (defaults to 0.0001) |
+| des | Experiment description (defaults to `test`) |
+| loss | Loss function (defaults to `mse`) |
+| lradj | Ways to adjust the learning rate (defaults to `type1`) |
+| use_amp | Whether to use automatic mixed precision training, using this argument means using amp (defaults to `False`) |
+| inverse | Whether to inverse output data, using this argument means inversing output data (defaults to `False`) |
+| use_gpu | Whether to use gpu (defaults to `True`) |
+| gpu | The gpu no, used for training and inference (defaults to 0) |
+| use_multi_gpu | Whether to use multiple gpus, using this argument means using mulitple gpus (defaults to `False`) |
+| devices | Device ids of multile gpus (defaults to `0,1,2,3`) |
+
+
+## <span id="resultslink">Results</span>
+
+We have updated the experiment results of all methods due to the change in data scaling. We are lucky that Informer gets performance improvement. Thank you @lk1983823 for reminding the data scaling in [issue 41](https://github.com/zhouhaoyi/Informer2020/issues/41).
+
+Besides, the experiment parameters of each data set are formated in the `.sh` files in the directory `./scripts/`. You can refer to these parameters for experiments, and you can also adjust the parameters to obtain better mse and mae results or draw better prediction figures.
+
+<p align="center">
+<img src="./img/result_univariate.png" height = "500" alt="" align=center />
+<br><br>
+<b>Figure 4.</b> Univariate forecasting results.
+</p>
+
+<p align="center">
+<img src="./img/result_multivariate.png" height = "500" alt="" align=center />
+<br><br>
+<b>Figure 5.</b> Multivariate forecasting results.
+</p>
+
+
+## FAQ
+If you run into a problem like `RuntimeError: The size of tensor a (98) must match the size of tensor b (96) at non-singleton dimension 1`, you can check torch version or modify code about `Conv1d` of `TokenEmbedding` in `models/embed.py` as the way of circular padding mode in Conv1d changed in different torch versions.
+
+
+## <span id="citelink">Citation</span>
+If you find this repository useful in your research, please consider citing the following papers:
+
+```
+@article{haoyietal-informerEx-2023,
+  author    = {Haoyi Zhou and
+               Jianxin Li and
+               Shanghang Zhang and
+               Shuai Zhang and
+               Mengyi Yan and
+               Hui Xiong},
+  title     = {Expanding the prediction capacity in long sequence time-series forecasting},
+  journal   = {Artificial Intelligence},
+  volume    = {318},
+  pages     = {103886},
+  issn      = {0004-3702},
+  year      = {2023},
+}
+```
+```
+@inproceedings{haoyietal-informer-2021,
+  author    = {Haoyi Zhou and
+               Shanghang Zhang and
+               Jieqi Peng and
+               Shuai Zhang and
+               Jianxin Li and
+               Hui Xiong and
+               Wancai Zhang},
+  title     = {Informer: Beyond Efficient Transformer for Long Sequence Time-Series Forecasting},
+  booktitle = {The Thirty-Fifth {AAAI} Conference on Artificial Intelligence, {AAAI} 2021, Virtual Conference},
+  volume    = {35},
+  number    = {12},
+  pages     = {11106--11115},
+  publisher = {{AAAI} Press},
+  year      = {2021},
+}
+```
+
+## Contact
+If you have any questions, feel free to contact Haoyi Zhou through Email (zhouhaoyi1991@gmail.com) or Github issues. Pull requests are highly welcomed!
+
+## Acknowledgments
+Thanks for the computing infrastructure provided by Beijing Advanced Innovation Center for Big Data and Brain Computing ([BDBC](http://bdbc.buaa.edu.cn/)).
+At the same time, thank you all for your attention to this work! [![hits](https://hits.tianyucn98.workers.dev/informer.svg?action=hit&title=hits&title_bg=%23555555&count_bg=%238CC443&edge_flat=false)](https://hits.tianyucn98.workers.dev)
+[![Stargazers repo roster for @zhouhaoyi/Informer2020](https://reporoster.com/stars/zhouhaoyi/Informer2020)](https://github.com/zhouhaoyi/Informer2020/stargazers)
+
+================
+File: requirements.txt
+================
+matplotlib == 3.1.1
+numpy == 1.19.4
+pandas == 0.25.1
+scikit_learn == 0.21.3
+torch == 1.8.0
+
+
+
+
+
+================================================================
+End of Codebase
+================================================================
